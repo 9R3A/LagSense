@@ -4,7 +4,7 @@ main: com.niner3a.lagsense.LagSense
 api-version: '1.20'
 description: '&a[&6Lag&eSense&a] &7by Itz_intellij - Personal Lag Analyzer for Players'
 website: 'https://github.com/9r3a/LagSense'
-author: Itz_intellij
+author: Itz_intellij & 9R3A
 authors: [Itz_intellij]
 prefix: LagSense
 

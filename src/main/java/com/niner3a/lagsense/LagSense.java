@@ -1,13 +1,27 @@
 package com.niner3a.lagsense;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.PluginDescriptionFile;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.concurrent.CompletableFuture;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
@@ -31,12 +45,23 @@ public class LagSense extends JavaPlugin {
     };
     
     private String pluginVersion;
+    private FileConfiguration config;
+    private File configFile;
+    private int consecutiveLagChecks = 0;
+    private long lastNotificationTime = 0;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm:ss");
+    private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
 
     @Override
     public void onEnable() {
         // Save version for later use
         PluginDescriptionFile pdf = getDescription();
         pluginVersion = pdf.getVersion();
+        
+        // Load or create config
+        saveDefaultConfig();
+        config = getConfig();
         
         // Print fancy logo and info
         printLogo();
@@ -48,11 +73,17 @@ public class LagSense extends JavaPlugin {
         sendColoredMessage("&7Use &a/lagsense &7to analyze your lag!");
         getLogger().info("");
         
-        // Register metrics if needed (you can add bStats later)
-        // https://bstats.org/plugin/bukkit/LagSense
-        // Metrics metrics = new Metrics(this, YOUR_PLUGIN_ID);
+        // Start lag detection task
+        startLagDetectionTask();
         
         getLogger().info("LagSense has been enabled!");
+        
+        // Check if Discord webhook is enabled but URL is not set
+        if (config.getBoolean("discord.enabled", false) && 
+            (config.getString("discord.webhook-url", "").isEmpty())) {
+            getLogger().warning("Discord webhook is enabled but no webhook URL is set!");
+            getLogger().warning("Please set 'discord.webhook-url' in config.yml");
+        }
         
         // Schedule repeating task to monitor TPS and other metrics
         new BukkitRunnable() {
@@ -262,5 +293,182 @@ public class LagSense extends JavaPlugin {
         getLogger().info("");
         sendColoredMessage("&6LagSense &7has been &cdisabled");
         getLogger().info("");
+    }
+    
+    @Override
+    public void saveDefaultConfig() {
+        if (configFile == null) {
+            configFile = new File(getDataFolder(), "config.yml");
+        }
+        if (!configFile.exists()) {
+            saveResource("config.yml", false);
+        }
+    }
+    
+    private void startLagDetectionTask() {
+        long checkInterval = config.getLong("lag-detection.check-interval", 60) * 20L;
+        if (checkInterval <= 0) {
+            getLogger().warning("Invalid check-interval in config.yml, using default 60 seconds");
+            checkInterval = 60 * 20L;
+        }
+        
+        new BukkitRunnable() {
+            private int consecutiveChecks = 0;
+            
+            @Override
+            public void run() {
+                double tps = getTps();
+                double cpuLoad = getCpuLoad() * 100;
+                double memoryUsage = getMemoryUsage() * 100;
+                
+                double tpsThreshold = config.getDouble("lag-detection.tps-threshold", 18.0);
+                double cpuThreshold = config.getDouble("lag-detection.cpu-threshold", 85.0);
+                double memoryThreshold = config.getDouble("lag-detection.memory-threshold", 85.0);
+                int minConsecutiveChecks = config.getInt("lag-detection.min-consecutive-checks", 2);
+                
+                boolean isLagging = tps < tpsThreshold || 
+                                  cpuLoad > cpuThreshold || 
+                                  memoryUsage > memoryThreshold;
+                
+                if (isLagging) {
+                    consecutiveChecks++;
+                    if (consecutiveChecks >= minConsecutiveChecks) {
+                        checkAndSendDiscordNotification(tps, cpuLoad, memoryUsage);
+                    }
+                } else {
+                    consecutiveChecks = 0;
+                }
+            }
+        }.runTaskTimerAsynchronously(this, 100L, checkInterval);
+    }
+    
+    private void checkAndSendDiscordNotification(double tps, double cpuUsage, double memoryUsage) {
+        if (!config.getBoolean("discord.enabled", false)) {
+            return;
+        }
+        
+        String webhookUrl = config.getString("discord.webhook-url");
+        if (webhookUrl == null || webhookUrl.isEmpty()) {
+            return;
+        }
+        
+        long currentTime = System.currentTimeMillis();
+        long cooldown = config.getLong("lag-detection.notification-cooldown", 300) * 1000L;
+        
+        if (currentTime - lastNotificationTime < cooldown) {
+            return; // Still in cooldown period
+        }
+        
+        lastNotificationTime = currentTime;
+        
+        // Format the message
+        String title = config.getString("discord.message.title", "⚠️ Server Lag Detected");
+        int color = config.getInt("discord.message.color", 15158332);
+        String footer = config.getString("discord.message.footer", "LagSense v{version} | {time}")
+                .replace("{version}", pluginVersion)
+                .replace("{time}", timeFormat.format(new Date()) + " " + dateFormat.format(new Date()));
+        
+        // Create embed
+        ObjectNode embed = objectMapper.createObjectNode();
+        embed.put("title", title);
+        embed.put("color", color);
+        embed.put("timestamp", new Date().toInstant().toString());
+        
+        // Add fields
+        ArrayNode fields = objectMapper.createArrayNode();
+        
+        ObjectNode tpsField = objectNode()
+                .put("name", "TPS")
+                .put("value", String.format("%.2f", tps) + " (Threshold: " + config.getDouble("lag-detection.tps-threshold", 18.0) + ")")
+                .put("inline", true);
+        fields.add(tpsField);
+        
+        ObjectNode cpuField = objectNode()
+                .put("name", "CPU Usage")
+                .put("value", String.format("%.1f%%", cpuUsage) + " (Threshold: " + config.getDouble("lag-detection.cpu-threshold", 85.0) + "%)")
+                .put("inline", true);
+        fields.add(cpuField);
+        
+        ObjectNode memoryField = objectNode()
+                .put("name", "Memory Usage")
+                .put("value", String.format("%.1f%%", memoryUsage) + " (Threshold: " + config.getDouble("lag-detection.memory-threshold", 85.0) + "%)")
+                .put("inline", true);
+        fields.add(memoryField);
+        
+        // Add server info
+        ObjectNode serverField = objectNode()
+                .put("name", "Server Info")
+                .put("value", "**Online Players:** " + Bukkit.getOnlinePlayers().size() + "/" + Bukkit.getMaxPlayers() + 
+                        "\n**Uptime:** " + formatUptime(ManagementFactory.getRuntimeMXBean().getUptime() / 1000))
+                .put("inline", false);
+        fields.add(serverField);
+        
+        embed.set("fields", fields);
+        
+        // Add footer
+        ObjectNode footerNode = objectNode()
+                .put("text", footer);
+        embed.set("footer", footerNode);
+        
+        // Create webhook payload
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("username", config.getString("discord.username", "LagSense"));
+        
+        String avatarUrl = config.getString("discord.avatar-url", "");
+        if (!avatarUrl.isEmpty()) {
+            payload.put("avatar_url", avatarUrl);
+        }
+        
+        ArrayNode embeds = objectMapper.createArrayNode();
+        embeds.add(embed);
+        payload.set("embeds", embeds);
+        
+        // Send webhook asynchronously
+        CompletableFuture.runAsync(() -> sendWebhook(webhookUrl, payload.toString()));
+    }
+    
+    private ObjectNode objectNode() {
+        return objectMapper.createObjectNode();
+    }
+    
+    private String formatUptime(long seconds) {
+        long days = seconds / 86400;
+        seconds %= 86400;
+        long hours = seconds / 3600;
+        seconds %= 3600;
+        long minutes = seconds / 60;
+        seconds %= 60;
+        
+        StringBuilder sb = new StringBuilder();
+        if (days > 0) sb.append(days).append("d ");
+        if (hours > 0 || days > 0) sb.append(hours).append("h ");
+        if (minutes > 0 || hours > 0 || days > 0) sb.append(minutes).append("m ");
+        sb.append(seconds).append("s");
+        
+        return sb.toString().trim();
+    }
+    
+    private void sendWebhook(String url, String jsonPayload) {
+        try {
+            HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setRequestProperty("User-Agent", "LagSense/" + pluginVersion);
+            connection.setDoOutput(true);
+            
+            try (OutputStream os = connection.getOutputStream()) {
+                byte[] input = jsonPayload.getBytes("utf-8");
+                os.write(input, 0, input.length);
+            }
+            
+            int responseCode = connection.getResponseCode();
+            if (responseCode < 200 || responseCode >= 300) {
+                getLogger().warning("Failed to send Discord webhook. Response code: " + responseCode);
+            }
+            
+            connection.disconnect();
+        } catch (IOException e) {
+            getLogger().warning("Error sending Discord webhook: " + e.getMessage());
+        }
     }
 }

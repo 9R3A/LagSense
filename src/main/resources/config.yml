@@ -1,0 +1,35 @@
+# LagSense Configuration
+#
+# Discord Webhook Settings
+discord:
+  # Enable or disable Discord webhook notifications
+  enabled: false
+  # Discord Webhook URL (get this from your Discord server)
+  webhook-url: ""
+  # Webhook username (shown as the sender in Discord)
+  username: "LagSense"
+  # Webhook avatar URL (optional)
+  avatar-url: ""
+  # Webhook message settings
+  message:
+    # Title of the embed message
+    title: "⚠️ Server Lag Detected"
+    # Color of the embed (in decimal)
+    color: 15158332  # Red
+    # Footer text
+    footer: "LagSense v{version} | {time}"
+
+# Lag detection settings
+lag-detection:
+  # Check interval in seconds (how often to check for lag)
+  check-interval: 60
+  # TPS threshold (below this value is considered lag)
+  tps-threshold: 18.0
+  # CPU usage threshold (percentage, 0-100)
+  cpu-threshold: 85.0
+  # Memory usage threshold (percentage, 0-100)
+  memory-threshold: 85.0
+  # Minimum time between notifications in seconds (to avoid spam)
+  notification-cooldown: 300
+  # Notify only if lag persists for X consecutive checks
+  min-consecutive-checks: 2
